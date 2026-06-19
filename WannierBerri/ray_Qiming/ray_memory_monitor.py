@@ -72,6 +72,19 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 
+from __future__ import annotations
+
+import json
+import os
+import socket
+import threading
+import time
+from dataclasses import dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Dict, List, Optional
+
+
 def set_thread_env(num_threads: int = 1, force: bool = False) -> None:
     """Set common BLAS/OpenMP thread environment variables."""
     value = str(int(num_threads))
@@ -114,6 +127,7 @@ def init_ray_for_wberri(
         num_cpus=int(num_cpus),
         _temp_dir=str(temp_dir),
         include_dashboard=include_dashboard,
+        log_to_driver=False,
     )
 
     if object_store_memory_gb is not None:
@@ -128,8 +142,10 @@ def _ray_init_existing_cluster(address: str, redis_password: Optional[str], **ra
     import ray
 
     # First try without redis password. Newer Ray may not need or accept it.
+    # log_to_driver=False avoids Ray trying to stream per-worker *.out files
+    # to the driver; this is more robust on some LSF/shared-filesystem setups.
     try:
-        kwargs = {"address": address}
+        kwargs = {"address": address, "log_to_driver": False}
         kwargs.update(ray_kwargs)
         ray.init(**kwargs)
         return
@@ -137,7 +153,7 @@ def _ray_init_existing_cluster(address: str, redis_password: Optional[str], **ra
         # If password is available, try legacy private argument.
         if redis_password:
             try:
-                kwargs = {"address": address, "_redis_password": redis_password}
+                kwargs = {"address": address, "_redis_password": redis_password, "log_to_driver": False}
                 kwargs.update(ray_kwargs)
                 ray.init(**kwargs)
                 return
@@ -178,19 +194,19 @@ def connect_or_init_ray_for_wberri(
     Path(temp_dir).mkdir(parents=True, exist_ok=True)
 
     if ray.is_initialized():
-        print("[ray_memory_monitor_v2] Ray is already initialized.", flush=True)
+        print("[ray_memory_monitor_v3] Ray is already initialized.", flush=True)
         return "already_initialized"
 
     address = os.environ.get("RAY_ADDRESS") or os.environ.get("ip_head")
     redis_password = os.environ.get("RAY_REDIS_PASSWORD") or os.environ.get("redis_password")
 
     if address:
-        print(f"[ray_memory_monitor_v2] Connecting to existing Ray cluster: {address}", flush=True)
+        print(f"[ray_memory_monitor_v3] Connecting to existing Ray cluster: {address}", flush=True)
         _ray_init_existing_cluster(address, redis_password, **ray_kwargs)
         return "cluster"
 
     print(
-        f"[ray_memory_monitor_v2] No RAY_ADDRESS/ip_head detected; "
+        f"[ray_memory_monitor_v3] No RAY_ADDRESS/ip_head detected; "
         f"starting local Ray with num_cpus={num_cpus}",
         flush=True,
     )
@@ -414,7 +430,7 @@ def _make_node_monitors() -> List[Any]:
 
     except Exception as err:
         print(
-            f"[ray_memory_monitor_v2] NodeAffinitySchedulingStrategy failed: {err!r}. "
+            f"[ray_memory_monitor_v3] NodeAffinitySchedulingStrategy failed: {err!r}. "
             "Falling back to non-affinity monitors.",
             flush=True,
         )
