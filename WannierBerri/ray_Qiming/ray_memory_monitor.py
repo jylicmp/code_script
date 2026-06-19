@@ -9,6 +9,13 @@ Author: Jiayu Li@HKU
 Version: v1.0
 Last modified: 2026-06-19
 
+Main functions:
+    connect_or_init_ray_for_wberri(...)
+    start_ray_memory_watch(...)
+    print_ray_cluster_info()
+    run_ray_worker_probe(...)
+    ray_shutdown_safe()
+
 Usage in the main WannierBerri script:
 
     import wannierberri as wberri
@@ -66,12 +73,7 @@ from typing import Any, Dict, List, Optional
 
 
 def set_thread_env(num_threads: int = 1, force: bool = False) -> None:
-    """
-    Set common BLAS/OpenMP thread environment variables.
-
-    For Ray parallelism, it is usually safer to use one BLAS/OpenMP thread per
-    Ray worker. Call this before importing numpy/scipy-heavy modules if possible.
-    """
+    """Set common BLAS/OpenMP thread environment variables."""
     value = str(int(num_threads))
     keys = [
         "OMP_NUM_THREADS",
@@ -96,24 +98,10 @@ def init_ray_for_wberri(
     **ray_kwargs: Any,
 ) -> None:
     """
-    Initialize Ray through WannierBerri's current helper.
+    Start a local Ray instance through WannierBerri's current helper.
 
-    Parameters
-    ----------
-    num_cpus
-        Number of Ray CPU slots to expose.
-    temp_dir
-        Ray temporary directory. Use a fast scratch/work directory, not /tmp.
-    include_dashboard
-        Whether to start Ray dashboard.
-    object_store_memory_gb
-        Optional Ray object store memory limit in GB.
-    set_blas_threads
-        If True, set OMP/MKL/OpenBLAS/etc. thread numbers before Ray starts.
-    blas_threads
-        Thread count used when set_blas_threads=True.
-    ray_kwargs
-        Additional keyword arguments passed to wannierberri.parallel.ray_init.
+    Use this only for single-node/local jobs. For LSF-launched Ray clusters,
+    use connect_or_init_ray_for_wberri(...).
     """
     if set_blas_threads:
         set_thread_env(blas_threads, force=False)
@@ -122,7 +110,7 @@ def init_ray_for_wberri(
 
     from wannierberri.parallel import ray_init
 
-    kwargs = dict(
+    kwargs: Dict[str, Any] = dict(
         num_cpus=int(num_cpus),
         _temp_dir=str(temp_dir),
         include_dashboard=include_dashboard,
@@ -135,45 +123,121 @@ def init_ray_for_wberri(
     ray_init(**kwargs)
 
 
-def ray_shutdown_safe() -> None:
-    """Shutdown Ray via WannierBerri helper, with fallback to ray.shutdown()."""
+def _ray_init_existing_cluster(address: str, redis_password: Optional[str], **ray_kwargs: Any) -> None:
+    """Connect to an existing Ray cluster, robust across Ray versions."""
+    import ray
+
+    # First try without redis password. Newer Ray may not need or accept it.
     try:
-        from wannierberri.parallel import ray_shutdown
+        kwargs = {"address": address}
+        kwargs.update(ray_kwargs)
+        ray.init(**kwargs)
+        return
+    except Exception as err_no_password:
+        # If password is available, try legacy private argument.
+        if redis_password:
+            try:
+                kwargs = {"address": address, "_redis_password": redis_password}
+                kwargs.update(ray_kwargs)
+                ray.init(**kwargs)
+                return
+            except Exception as err_with_password:
+                raise RuntimeError(
+                    "Failed to connect to existing Ray cluster both without and with "
+                    "_redis_password. "
+                    f"address={address!r}, "
+                    f"err_no_password={err_no_password!r}, "
+                    f"err_with_password={err_with_password!r}"
+                ) from err_with_password
+        raise
 
-        ray_shutdown()
+
+def connect_or_init_ray_for_wberri(
+    num_cpus: int,
+    temp_dir: str,
+    include_dashboard: bool = False,
+    object_store_memory_gb: Optional[float] = None,
+    set_blas_threads: bool = True,
+    blas_threads: int = 1,
+    **ray_kwargs: Any,
+) -> str:
+    """
+    Connect to existing Ray cluster if RAY_ADDRESS/ip_head is set; otherwise
+    start local Ray.
+
+    Returns
+    -------
+    str
+        "cluster", "local", or "already_initialized".
+    """
+    if set_blas_threads:
+        set_thread_env(blas_threads, force=False)
+
+    import ray
+
+    Path(temp_dir).mkdir(parents=True, exist_ok=True)
+
+    if ray.is_initialized():
+        print("[ray_memory_monitor_v2] Ray is already initialized.", flush=True)
+        return "already_initialized"
+
+    address = os.environ.get("RAY_ADDRESS") or os.environ.get("ip_head")
+    redis_password = os.environ.get("RAY_REDIS_PASSWORD") or os.environ.get("redis_password")
+
+    if address:
+        print(f"[ray_memory_monitor_v2] Connecting to existing Ray cluster: {address}", flush=True)
+        _ray_init_existing_cluster(address, redis_password, **ray_kwargs)
+        return "cluster"
+
+    print(
+        f"[ray_memory_monitor_v2] No RAY_ADDRESS/ip_head detected; "
+        f"starting local Ray with num_cpus={num_cpus}",
+        flush=True,
+    )
+    init_ray_for_wberri(
+        num_cpus=num_cpus,
+        temp_dir=temp_dir,
+        include_dashboard=include_dashboard,
+        object_store_memory_gb=object_store_memory_gb,
+        set_blas_threads=False,
+        blas_threads=blas_threads,
+        **ray_kwargs,
+    )
+    return "local"
+
+
+def ray_shutdown_safe() -> None:
+    """Shutdown Ray safely from the driver."""
+    try:
+        import ray
+
+        if ray.is_initialized():
+            ray.shutdown()
     except Exception:
-        try:
-            import ray
-
-            if ray.is_initialized():
-                ray.shutdown()
-        except Exception:
-            pass
+        pass
 
 
 def print_ray_cluster_info() -> None:
-    """Print Ray cluster and node information."""
+    """Print Ray cluster resources and node information."""
     import ray
 
-    print("\n===== Ray initialized =====")
-    print("ray.is_initialized() =", ray.is_initialized())
+    print("\n===== Ray initialized =====", flush=True)
+    print("ray.is_initialized() =", ray.is_initialized(), flush=True)
     if not ray.is_initialized():
         return
 
-    print("cluster_resources =", ray.cluster_resources())
-    print("available_resources =", ray.available_resources())
+    print("cluster_resources =", ray.cluster_resources(), flush=True)
+    print("available_resources =", ray.available_resources(), flush=True)
 
-    print("\n===== Ray nodes =====")
+    print("\n===== Ray nodes =====", flush=True)
     for i, node in enumerate(ray.nodes()):
-        print(f"\n--- node {i} ---")
-        print(json.dumps(node, indent=2, default=str))
+        print(f"\n--- node {i} ---", flush=True)
+        print(json.dumps(node, indent=2, default=str), flush=True)
 
 
 def run_ray_worker_probe(num_probe: int, sleep_time: float = 5.0) -> List[Dict[str, Any]]:
     """
-    Submit simple Ray tasks to check how many unique worker processes are actually used.
-
-    Useful before calling wberri.run(...).
+    Submit simple Ray tasks to check worker placement and unique worker count.
     """
     import ray
 
@@ -183,11 +247,9 @@ def run_ray_worker_probe(num_probe: int, sleep_time: float = 5.0) -> List[Dict[s
         import os
         import socket
         import time
-
         import ray
 
         ctx = ray.get_runtime_context()
-
         info = {
             "probe_id": i,
             "hostname": socket.gethostname(),
@@ -208,9 +270,9 @@ def run_ray_worker_probe(num_probe: int, sleep_time: float = 5.0) -> List[Dict[s
     infos = ray.get([_probe_worker.remote(i, sleep_time) for i in range(int(num_probe))])
     unique_workers = {(x["hostname"], x["pid"]) for x in infos}
 
-    print("\n===== Ray worker probe summary =====")
-    print(f"requested probes = {num_probe}")
-    print(f"unique worker processes observed = {len(unique_workers)}")
+    print("\n===== Ray worker probe summary =====", flush=True)
+    print(f"requested probes = {num_probe}", flush=True)
+    print(f"unique worker processes observed = {len(unique_workers)}", flush=True)
 
     return infos
 
@@ -240,10 +302,8 @@ try:
             self.hostname = socket.gethostname()
 
         def snapshot(self, topn: int = 20) -> Dict[str, Any]:
-            import os
             import socket
             import time
-
             import psutil
 
             rows: List[Dict[str, Any]] = []
@@ -256,8 +316,6 @@ try:
                     cmdline = _short_cmd(info.get("cmdline"))
                     name = info.get("name") or ""
 
-                    # Ray workers and Ray core processes.  WannierBerri remote
-                    # tasks normally appear as "ray::paralfunc" in cmdline/logs.
                     is_ray_process = (
                         "ray::" in cmdline
                         or "ray_worker" in cmdline
@@ -321,8 +379,6 @@ except Exception:
 
 @dataclass
 class MemoryWatchHandle:
-    """Handle returned by start_ray_memory_watch(...)."""
-
     stop_event: threading.Event
     thread: threading.Thread
     log_file: str
@@ -334,27 +390,40 @@ class MemoryWatchHandle:
 
 def _make_node_monitors() -> List[Any]:
     import ray
-    from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
 
     if RayNodeMemoryMonitor is None:
         raise RuntimeError(
             "RayNodeMemoryMonitor could not be defined. "
-            "Check that ray is importable before using start_ray_memory_watch()."
+            "Check that ray and psutil are installed."
         )
 
     monitors: List[Any] = []
-    for node in ray.nodes():
-        if not node.get("Alive", False):
-            continue
 
-        node_id = node["NodeID"]
-        mon = RayNodeMemoryMonitor.options(
-            scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=False)
-        ).remote()
-        monitors.append(mon)
+    try:
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+        for node in ray.nodes():
+            if not node.get("Alive", False):
+                continue
+
+            node_id = node["NodeID"]
+            mon = RayNodeMemoryMonitor.options(
+                scheduling_strategy=NodeAffinitySchedulingStrategy(node_id=node_id, soft=False)
+            ).remote()
+            monitors.append(mon)
+
+    except Exception as err:
+        print(
+            f"[ray_memory_monitor_v2] NodeAffinitySchedulingStrategy failed: {err!r}. "
+            "Falling back to non-affinity monitors.",
+            flush=True,
+        )
+        # Fallback: create at least one monitor. This may only monitor the node
+        # where the actor is scheduled.
+        monitors.append(RayNodeMemoryMonitor.remote())
 
     if not monitors:
-        raise RuntimeError("No alive Ray nodes found. Did you call ray_init first?")
+        raise RuntimeError("No alive Ray nodes found. Did you connect/init Ray first?")
 
     return monitors
 
@@ -370,30 +439,12 @@ def start_ray_memory_watch(
     """
     Start a background thread that records Ray process memory usage.
 
-    Parameters
-    ----------
-    log_file
-        JSONL output file. One JSON record per interval.
-    interval_sec
-        Monitoring interval.
-    topn
-        Number of largest Ray-related processes to store per node.
-    warn_node_used_percent
-        Print warning when node memory usage exceeds this percentage.
-    print_topn
-        Number of largest processes printed to stdout per node.
-    append
-        If True append to existing log; otherwise overwrite.
-
-    Returns
-    -------
-    MemoryWatchHandle
-        Call handle.stop() after wberri.run finishes.
+    It writes JSONL records to log_file and prints a compact summary to stdout.
     """
     import ray
 
     if not ray.is_initialized():
-        raise RuntimeError("Ray is not initialized. Call init_ray_for_wberri(...) first.")
+        raise RuntimeError("Ray is not initialized. Call connect_or_init_ray_for_wberri(...) first.")
 
     log_path = Path(log_file)
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -462,11 +513,7 @@ def start_ray_memory_watch(
 
 
 def summarize_memory_log(log_file: str, topn: int = 20) -> List[Dict[str, Any]]:
-    """
-    Read a ray_memory_watch.jsonl file and summarize peak process RSS per host/PID.
-
-    Returns a list sorted by peak RSS descending.
-    """
+    """Summarize peak process RSS from a ray_memory_watch.jsonl file."""
     peaks: Dict[str, Dict[str, Any]] = {}
 
     with open(log_file, "r") as f:
