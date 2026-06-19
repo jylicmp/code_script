@@ -1,0 +1,58 @@
+#!/bin/bash
+
+# SCRIPT FOR RUNNING RAY + WannierBerri ON SERVER WITH LSF
+# Written by Jiayu Li@HKU, 20240914
+# Modified: add Ray worker/memory monitoring (20260619)
+
+#BSUB -J mqmtest
+#BSUB -q 2t50c
+#BSUB -n 128
+#BSUB -R "span[ptile=64]"
+##BSUB -m "a01u21s a02u21s a03u24s a05u05s a06u24s a07u21s a08u21s"
+#BSUB -e %J.err
+#BSUB -o %J.out
+
+date
+hostfile=`echo $LSB_DJOB_HOSTFILE`
+
+# Load modules or your own conda environment here
+source /YOUR/PATH/TO/anaconda3/etc/profile.d/conda.sh
+conda activate /YOUR/PATH/TO/anaconda3/envs/wberri_v1.8
+
+# Keep Ray temporary files on work/scratch, not /tmp.
+export RAY_TMPDIR="/YOUR/PATH/TO/ray_tmp"
+
+# Reduce nested BLAS/OpenMP threading inside Ray workers.
+export OMP_NUM_THREADS=1
+export MKL_NUM_THREADS=1
+export OPENBLAS_NUM_THREADS=1
+export NUMEXPR_NUM_THREADS=1
+export VECLIB_MAXIMUM_THREADS=1
+
+# Ray log/debug options.
+export RAY_DEDUP_LOGS=0
+
+# Memory monitor options read by main_wb.py.
+export WB_RAY_MONITOR_INTERVAL=10
+export WB_RAY_MONITOR_TOPN=20
+export WB_RAY_MONITOR_PRINT_TOPN=5
+export WB_RAY_WARN_PERCENT=90
+
+# Optional worker-placement probe before WannierBerri starts.
+# Set to 1 for debugging. Set to 0 for production once everything is stable.
+export WB_RAY_PROBE=1
+export WB_RAY_PROBE_N=64
+
+# Used only if main_wb.py is run directly without ray_launch_cluster.
+export WB_RAY_NUM_CPUS_LOCAL=16
+export WB_OBJECT_STORE_GB=20
+
+# Object-store memory in bytes per Ray node.
+# 20 GB is a reasonable starting point for WannierBerri; adjust if Ray complains.
+OBJECT_STORE_BYTES=20000000000
+
+sh ./ray_launch_cluster_monitored.sh \
+    -c "python -u main_wb.py 2-nodes" \
+    -n "wberri_v1.8" \
+    -m "$OBJECT_STORE_BYTES" \
+    > job.log 2>&1

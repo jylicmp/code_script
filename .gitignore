@@ -1,0 +1,45 @@
+# macOS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs and scheduler output
+*.log
+*.out
+*.err
+job.log
+*.jsonl
+
+# Ray runtime files
+ray_tmp/
+ray-*/
+session_*/
+
+# WannierBerri scratch/output directories used by local templates
+wb_Klist*/
+result/
+results/
+
+# Large/generated scientific data
+*.npy
+*.npz
+*.h5
+*.hdf5
+*.dat.tmp
